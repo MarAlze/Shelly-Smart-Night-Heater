@@ -47,8 +47,24 @@ let CONFIG = {
 // --- HELPER FUNCTIONS ---
 function urlEncode(str) {
   var s = String(str);
-  s = s.split(' ').join('%20'); s = s.split(':').join('%3A');
-  s = s.split('.').join('%2E'); s = s.split(',').join('%2C');
+  // Encode the percent sign first to avoid double-encoding other characters.
+  s = s.split('%').join('%25');
+  s = s.split(' ').join('%20');
+  s = s.split('&').join('%26');
+  s = s.split('+').join('%2B');
+  s = s.split('?').join('%3F');
+  s = s.split('=').join('%3D');
+  s = s.split('#').join('%23');
+  s = s.split('/').join('%2F');
+  s = s.split(':').join('%3A');
+  s = s.split(';').join('%3B');
+  s = s.split('<').join('%3C');
+  s = s.split('>').join('%3E');
+  s = s.split('"').join('%22');
+  s = s.split("'").join('%27');
+  // The original function also encoded these, keeping for consistency.
+  s = s.split('.').join('%2E');
+  s = s.split(',').join('%2C');
   return s;
 }
 
@@ -143,12 +159,26 @@ function scheduleCharging() {
   
   // Calculate the dynamic start time using modulo arithmetic for robustness
   let dynamicStartSeconds = (windowEndSeconds - nextChargingDurationSeconds + 24 * 3600) % (24 * 3600);
+
+  // Sanity check: If the calculated start time is outside the window, clamp it to the window start.
+  // This makes the logic more robust against edge cases.
+  let isOvernight = windowStartSeconds > windowEndSeconds;
+  let startIsInWindow = (isOvernight)
+      ? (dynamicStartSeconds >= windowStartSeconds || dynamicStartSeconds < windowEndSeconds)
+      : (dynamicStartSeconds >= windowStartSeconds && dynamicStartSeconds < windowEndSeconds);
+
+  if (!startIsInWindow && windowDurationSeconds > 0) {
+      console.log("WARN: Calculated start time " + secondsToTime(dynamicStartSeconds) + " is outside window. Clamping to window start.");
+      dynamicStartSeconds = windowStartSeconds;
+      nextChargingDurationSeconds = windowDurationSeconds;
+  }
+
   let dynamicStartTimeStr = secondsToTime(dynamicStartSeconds);
 
   // --- Test Mode Output ---
   if (CONFIG.IS_TEST_MODE) {
     if (nextChargingDurationSeconds > 0) {
-      console.log("TEST MODE: Would schedule charging to start at " + dynamicStartTimeStr + " for " + nextChargingDurationSeconds + " seconds.");
+      console.log("TEST MODE: Would schedule charging to start at " + dynamicStartTimeStr + " for " + Math.round(nextChargingDurationSeconds) + " seconds.");
     } else {
       console.log("TEST MODE: No charging would be scheduled.");
     }
@@ -162,7 +192,7 @@ function scheduleCharging() {
     if (nextChargingDurationSeconds > 0) {
       Shelly.call("Schedule.Create", {
         id: id, enable: true, timespec: cronExpr,
-        calls: [{ method: "Switch.Set", params: { id: id, on: true, toggle_after: nextChargingDurationSeconds } }],
+        calls: [{ method: "Switch.Set", params: { id: id, on: true, toggle_after: Math.round(nextChargingDurationSeconds) } }],
       }, function(res, err_code) {
         if (err_code === 0) console.log("SUCCESS: Switch", id, "scheduled to start at", dynamicStartTimeStr);
         else sendTelegramNotification("Failed to create schedule for Switch " + id);
