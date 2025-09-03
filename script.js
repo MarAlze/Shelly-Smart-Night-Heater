@@ -1,10 +1,10 @@
 /**
  * Shelly Script for intelligent control of a night storage heater.
- * Version: 4.2
+ * Version: 4.9 (Made Telegram notifications configurable)
  * ## Features:
  * 1. Backward Scheduling: The charge is scheduled to FINISH at a set time.
  * 2. Fetches the next day's weather forecast to calculate the required charge duration.
- * 3. Supports multiple switches (e.g., for Shelly Pro 1 and Shelly Pro 2).
+ * 3. Supports multiple switches (e.g., for Shelly Pro 2).
  * 4. Uses a seasonal fallback duration if the weather API is unreachable.
  * 5. Includes a robust test mode with detailed console output and Telegram notifications.
  */
@@ -34,8 +34,11 @@ let CONFIG = {
   TELEGRAM_BOT_TOKEN: "",
   TELEGRAM_CHAT_ID: "",
   
+  SEND_TELEGRAM_SCHEDULE_LIST: false, // Send list of existing schedules?
+  SEND_TELEGRAM_NEW_SCHEDULE: false,  // Send details of the new schedule?
+
   // --- Test Mode ---
-  IS_TEST_MODE: true,
+  IS_TEST_MODE: false,
   TEST_INTERVAL_MINUTES: 5,
 
   // --- System Settings ---
@@ -47,8 +50,11 @@ let CONFIG = {
 // --- HELPER FUNCTIONS ---
 function urlEncode(str) {
   var s = String(str);
-  s = s.split(' ').join('%20'); s = s.split(':').join('%3A');
-  s = s.split('.').join('%2E'); s = s.split(',').join('%2C');
+  s = s.split(' ').join('%20');
+  s = s.split(':').join('%3A');
+  s = s.split('.').join('%2E');
+  s = s.split(',').join('%2C');
+  s = s.split('\n').join('%0A'); // Needed for multi-line messages
   return s;
 }
 
@@ -60,11 +66,13 @@ function timeToSeconds(timeStr) {
 function secondsToTime(seconds) {
   let h = Math.floor(seconds / 3600);
   let m = Math.floor((seconds % 3600) / 60);
+  // This function is now only for display purposes (Telegram), so leading zeros are OK.
   return (h < 10 ? '0' : '') + String(h) + ":" + (m < 10 ? '0' : '') + String(m);
 }
 
 // --- CORE SCRIPT ---
 let nextChargingDurationSeconds = -1;
+let lastAvgTemp = -999;
 
 function sendTelegramNotification(message) {
   if (!CONFIG.TELEGRAM_BOT_TOKEN || !CONFIG.TELEGRAM_CHAT_ID) { return; }
@@ -77,9 +85,10 @@ function sendTelegramNotification(message) {
 
 function getWeatherAndCalculateDuration() {
   console.log("INFO: Fetching weather data...");
-  Shelly.call("HTTP.GET", { url: "https://api.open-meteo.com/v1/forecast?latitude=" + CONFIG.LATITUDE + "&longitude=" + CONFIG.LONGITUDE + "&hourly=temperature_2m&timezone=" + CONFIG.TIMEZONE + "&forecast_days=2", timeout: 15 }, function(res, err_code) {
+  let weatherUrl = "https://api.open-meteo.com/v1/forecast?latitude=" + CONFIG.LATITUDE + "&longitude=" + CONFIG.LONGITUDE + "&hourly=temperature_2m&timezone=" + CONFIG.TIMEZONE + "&forecast_days=2";
+  Shelly.call("HTTP.GET", { url: weatherUrl, timeout: 15 }, function(res, err_code) {
     if (err_code !== 0 || !res || res.code !== 200) {
-      let msg = "Weather API unreachable.";
+      let msg = "Weather API unreachable. Code: " + String(err_code);
       console.log("ERROR:", msg); sendTelegramNotification(msg); calculateFallbackDuration(); return;
     }
     console.log("INFO: Weather data received.");
@@ -90,19 +99,18 @@ function getWeatherAndCalculateDuration() {
       let sum = 0; for (let i = 0; i < temps.length; i++) sum += temps[i];
       calculateChargingDuration(sum / temps.length);
     } catch (e) {
-      let msg = "Failed to parse weather data.";
+      let msg = "Failed to parse weather data. Error: " + e.message;
       console.log("ERROR:", msg); sendTelegramNotification(msg); calculateFallbackDuration();
     }
   });
 }
 
 function calculateChargingDuration(avgTemp) {
-  console.log("INFO: Tomorrow's average temperature:", avgTemp.toFixed(2), "°C");
+  lastAvgTemp = avgTemp;
   let hours = (avgTemp < CONFIG.START_TEMP) ? (CONFIG.START_TEMP - avgTemp) * CONFIG.SLOPE : 0;
   if (hours > CONFIG.MAX_RUNTIME_HOURS) hours = CONFIG.MAX_RUNTIME_HOURS;
   if (hours < 0) hours = 0;
   nextChargingDurationSeconds = Math.round(hours * 3600);
-  console.log("RESULT: Calculated duration:", hours.toFixed(2), "hours (", nextChargingDurationSeconds, "s)");
   scheduleCharging();
 }
 
@@ -118,58 +126,92 @@ function calculateFallbackDuration() {
   });
 }
 
-/**
- * Creates or updates the Shelly Schedules.
- * In test mode, it prints the intended schedule to the console instead.
- */
 function scheduleCharging() {
-  let windowEndSeconds = timeToSeconds(CONFIG.CHARGING_WINDOW_END);
-  let windowStartSeconds = timeToSeconds(CONFIG.CHARGING_WINDOW_START);
-
-
-  // Calculate the total available time in the window
-  let windowDurationSeconds;
-  if (windowStartSeconds > windowEndSeconds) { // Handles overnight windows like 22:00-06:00
-      windowDurationSeconds = (24 * 3600 - windowStartSeconds) + windowEndSeconds;
-  } else {
-      windowDurationSeconds = windowEndSeconds - windowStartSeconds;
-  }
-
-  // Ensure the required charging time does not exceed the available window
-  if (nextChargingDurationSeconds > windowDurationSeconds) {
-    console.log("INFO: Calculated duration exceeds window. Capping duration to fit window.");
-    nextChargingDurationSeconds = windowDurationSeconds;
-  }
-  
-  // Calculate the dynamic start time using modulo arithmetic for robustness
-  let dynamicStartSeconds = (windowEndSeconds - nextChargingDurationSeconds + 24 * 3600) % (24 * 3600);
-  let dynamicStartTimeStr = secondsToTime(dynamicStartSeconds);
-
-  // --- Test Mode Output ---
   if (CONFIG.IS_TEST_MODE) {
-    if (nextChargingDurationSeconds > 0) {
-      console.log("TEST MODE: Would schedule charging to start at " + dynamicStartTimeStr + " for " + nextChargingDurationSeconds + " seconds.");
-    } else {
-      console.log("TEST MODE: No charging would be scheduled.");
-    }
+    console.log("TEST MODE: No schedules will be created or deleted.");
     return;
   }
-  
-  // --- Production Mode Logic ---
-  let cronExpr = "0 " + dynamicStartTimeStr.split(':')[1] + " " + dynamicStartTimeStr.split(':')[0] + " * * *";
-  CONFIG.SWITCH_IDS.forEach(function(id) {
-    Shelly.call("Schedule.DeleteAll", { id: id });
-    if (nextChargingDurationSeconds > 0) {
-      Shelly.call("Schedule.Create", {
-        id: id, enable: true, timespec: cronExpr,
-        calls: [{ method: "Switch.Set", params: { id: id, on: true, toggle_after: nextChargingDurationSeconds } }],
-      }, function(res, err_code) {
-        if (err_code === 0) console.log("SUCCESS: Switch", id, "scheduled to start at", dynamicStartTimeStr);
-        else sendTelegramNotification("Failed to create schedule for Switch " + id);
-      });
-    } else {
-      console.log("INFO: No charging required for Switch", id);
+
+  console.log("INFO: Listing all existing schedules before deletion...");
+  Shelly.call("Schedule.List", {}, function(list_res, list_err_code) {
+    if (list_err_code !== 0) {
+      let listErrorMsg = "ERROR: Failed to list schedules. Aborting.";
+      console.log(listErrorMsg); sendTelegramNotification(listErrorMsg); return;
     }
+
+    let scheduleListMsg = "Existing schedules before deletion:\n";
+    if (list_res && list_res.jobs && list_res.jobs.length > 0) {
+      for (let i = 0; i < list_res.jobs.length; i++) {
+        let job = list_res.jobs[i];
+        scheduleListMsg += "\nID: " + job.id + ", Aktiv: " + job.enable + ", Cron: " + job.timespec;
+      }
+    } else {
+      scheduleListMsg += "No schedules found.";
+    }
+    console.log("DEBUG: " + scheduleListMsg.split('\n').join(' | '));
+    if (CONFIG.SEND_TELEGRAM_SCHEDULE_LIST) {
+      sendTelegramNotification(scheduleListMsg);
+    }
+
+    console.log("INFO: Deleting all existing schedules now...");
+    Shelly.call("Schedule.DeleteAll", {}, function(res, err_code) {
+      if (err_code !== 0) {
+        let errorMsg = "ERROR: Failed to delete schedules. Aborting.";
+        console.log(errorMsg); sendTelegramNotification(errorMsg); return;
+      }
+
+      console.log("SUCCESS: All old schedules deleted.");
+      if (nextChargingDurationSeconds <= 0) {
+        let message = "No charging required.\n\n" +
+                      "Temperature forecast: " + lastAvgTemp.toFixed(2) + "°C\n" +
+                      "switch-on threshold: " + CONFIG.START_TEMP.toFixed(2) + "°C";
+        console.log("INFO: " + message.split('\n').join(' | '));
+        if (CONFIG.SEND_TELEGRAM_NEW_SCHEDULE) {
+          sendTelegramNotification(message);
+        }
+        return;
+      }
+
+      let windowEndSeconds = timeToSeconds(CONFIG.CHARGING_WINDOW_END);
+      let dynamicStartSeconds = (windowEndSeconds - nextChargingDurationSeconds + 24 * 3600) % (24 * 3600);
+      
+      // CORRECTION: Create cron parts without leading zeros for the API.
+      let h_cron = Math.floor(dynamicStartSeconds / 3600);
+      let m_cron = Math.floor((dynamicStartSeconds % 3600) / 60);
+      let cronExpr = "0 " + String(m_cron) + " " + String(h_cron) + " * * *";
+      console.log("DEBUG: Generated cron expression for API: " + cronExpr);
+
+      // We continue to use the formatted time for display in Telegram.
+      let dynamicStartTimeStr = secondsToTime(dynamicStartSeconds);
+      let durationMinutes = (nextChargingDurationSeconds / 60).toFixed(2);
+      let durationHours = (nextChargingDurationSeconds / 3600).toFixed(2);
+
+      CONFIG.SWITCH_IDS.forEach(function(switchId) {
+        let message = "New loading plan created.\n\n" +
+                      "Temperature forecast: " + lastAvgTemp.toFixed(2) + "°C\n" +
+                      "charging time: " + durationHours + " Std (" + durationMinutes + " Min)\n" +
+                      "start time: " + dynamicStartTimeStr + "\n" +
+                      "end time: " + CONFIG.CHARGING_WINDOW_END;
+        
+        let createParams = {
+          enable: true, timespec: cronExpr,
+          calls: [{ method: "Switch.Set", params: { id: switchId, on: true, toggle_after: nextChargingDurationSeconds } }],
+        };
+
+        Shelly.call("Schedule.Create", createParams, function(res_create, err_create) {
+          if (err_create === 0) {
+            console.log("SUCCESS: " + message.split('\n').join(' | '));
+            if (CONFIG.SEND_TELEGRAM_NEW_SCHEDULE) {
+              sendTelegramNotification(message);
+            }
+          } else {
+            let errorMsg = "ERROR: Failed to create schedule for Switch " + switchId;
+            console.log(errorMsg);
+            sendTelegramNotification(errorMsg);
+          }
+        });
+      });
+    });
   });
 }
 
@@ -177,14 +219,16 @@ function initializeTimers() {
   if (CONFIG.IS_TEST_MODE) {
     console.log("INFO: Script starting in TEST MODE. Checks will run every", CONFIG.TEST_INTERVAL_MINUTES, "minutes.");
     sendTelegramNotification("Test mode activated. Notifications are working.");
+    getWeatherAndCalculateDuration(); 
     Timer.set(CONFIG.TEST_INTERVAL_MINUTES * 60 * 1000, true, getWeatherAndCalculateDuration);
   } else {
-    let cronExpr = "0 " + CONFIG.DATA_FETCH_TIME.split(':')[1] + " " + CONFIG.DATA_FETCH_TIME.split(':')[0] + " * * *";
-    console.log("INFO: Script starting in PRODUCTION MODE. Daily check scheduled with cron:", cronExpr);
-    Shelly.call("Schedule.Create", { enable: true, timespec: cronExpr, calls: [{ method: "Script.Start", params: { id: Shelly.getCurrentScriptId() } }] });
+    console.log("INFO: Script starting in PRODUCTION MODE. Running data fetch and scheduling once.");
+    getWeatherAndCalculateDuration();
   }
-  getWeatherAndCalculateDuration();
 }
 
 // --- Script Entry Point ---
+initializeTimers();
+
+
 initializeTimers();
