@@ -57,14 +57,26 @@ let CONFIG = {
   SLOPE: 0.5,       // Additional charge time per degree colder (in hours/°C)
   MAX_RUNTIME_HOURS: 8.0, // Absolute maximum charge duration
 
+  // --- Fallback & Telegram ---
+  FALLBACK_HOURS_Q1: 6.0, FALLBACK_HOURS_Q2: 2.0,
+  FALLBACK_HOURS_Q3: 0.0, FALLBACK_HOURS_Q4: 5.0,
+
   // --- Telegram Notifications (Optional) ---
   TELEGRAM_BOT_TOKEN: "", // Your bot token
   TELEGRAM_CHAT_ID: "",   // Your chat ID
+
+  SEND_TELEGRAM_SCHEDULE_LIST: false, // Send list of existing schedules?
+  SEND_TELEGRAM_NEW_SCHEDULE: true,  // Send details of the new schedule?
   
   // --- Test Mode ---
   // true: Runs logic checks without switching relays.
   // false: Normal operation.
   IS_TEST_MODE: false, 
+  TEST_INTERVAL_MINUTES: 5,
+
+  // --- System Settings ---
+  TIMEZONE: "Europe/Berlin",
+  DATA_FETCH_TIME: "09:37"
 };
 ```
 
