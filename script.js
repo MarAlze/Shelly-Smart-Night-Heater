@@ -1,12 +1,14 @@
 /**
  * Shelly Script for intelligent control of a night storage heater.
- * Version: 4.9 (Made Telegram notifications configurable)
+ * Version: 5.0 (Fixed: daily timer for production mode re-added)
+ *
  * ## Features:
- * 1. Backward Scheduling: The charge is scheduled to FINISH at a set time.
- * 2. Fetches the next day's weather forecast to calculate the required charge duration.
- * 3. Supports multiple switches (e.g., for Shelly Pro 2).
- * 4. Uses a seasonal fallback duration if the weather API is unreachable.
- * 5. Includes a robust test mode with detailed console output and Telegram notifications.
+ * 1.  Backward Scheduling: The charge is scheduled to FINISH at a set time.
+ * 2.  Fetches the next day's weather forecast to calculate the required charge duration.
+ * 3.  Supports multiple switches (e.g., for Shelly Pro 2).
+ * 4.  Uses a seasonal fallback duration if the weather API is unreachable.
+ * 5.  Includes a robust test mode with detailed console output and Telegram notifications.
+ * 6.  Includes a reliable daily trigger for automatic schedule creation in production mode.
  */
 
 // ------------------- CONFIGURATION -------------------
@@ -73,6 +75,8 @@ function secondsToTime(seconds) {
 // --- CORE SCRIPT ---
 let nextChargingDurationSeconds = -1;
 let lastAvgTemp = -999;
+// Status variable to prevent the calculation from running multiple times a day.
+let hasRunToday = false;
 
 function sendTelegramNotification(message) {
   if (!CONFIG.TELEGRAM_BOT_TOKEN || !CONFIG.TELEGRAM_CHAT_ID) { return; }
@@ -175,13 +179,13 @@ function scheduleCharging() {
       let windowEndSeconds = timeToSeconds(CONFIG.CHARGING_WINDOW_END);
       let dynamicStartSeconds = (windowEndSeconds - nextChargingDurationSeconds + 24 * 3600) % (24 * 3600);
       
-      // CORRECTION: Create cron parts without leading zeros for the API.
+
       let h_cron = Math.floor(dynamicStartSeconds / 3600);
       let m_cron = Math.floor((dynamicStartSeconds % 3600) / 60);
       let cronExpr = "0 " + String(m_cron) + " " + String(h_cron) + " * * *";
       console.log("DEBUG: Generated cron expression for API: " + cronExpr);
 
-      // We continue to use the formatted time for display in Telegram.
+      // We use the formatted time for display in Telegram.
       let dynamicStartTimeStr = secondsToTime(dynamicStartSeconds);
       let durationMinutes = (nextChargingDurationSeconds / 60).toFixed(2);
       let durationHours = (nextChargingDurationSeconds / 3600).toFixed(2);
@@ -215,20 +219,59 @@ function scheduleCharging() {
   });
 }
 
+// This function checks every minute whether it is time to start the calculation.
+function dailyCheck() {
+  Shelly.call("Sys.GetStatus", {}, function(result) {
+    if (!result || !result.time) return; // Exit if no valid time
+    console.log(result.time);
+    // 
+    let currentTime = result.time;
+
+    // Check whether the target time has been reached AND the function has not yet run today.
+    if (currentTime === CONFIG.DATA_FETCH_TIME && !hasRunToday) {
+      console.log("INFO: Trigger time " + CONFIG.DATA_FETCH_TIME + " reached. Starting schedule creation.");
+      sendTelegramNotification("Starte die Erstellung des Ladeplans für morgen.");
+      getWeatherAndCalculateDuration();
+      hasRunToday = true; // Remember that the function has been performed for today
+    }
+
+    // Reset of the “hasRunToday” flag shortly after midnight
+    if (currentTime === "00:01") {
+      if (hasRunToday) {
+          console.log("INFO: Resetting daily run flag for the new day.");
+          hasRunToday = false;
+      }
+    }
+  });
+}
+
+
 function initializeTimers() {
   if (CONFIG.IS_TEST_MODE) {
     console.log("INFO: Script starting in TEST MODE. Checks will run every", CONFIG.TEST_INTERVAL_MINUTES, "minutes.");
-    sendTelegramNotification("Test mode activated. Notifications are working.");
-    getWeatherAndCalculateDuration(); 
+    sendTelegramNotification("Test-Modus aktiviert.");
+    // Run once immediately
+    getWeatherAndCalculateDuration();
+    // Then set the repeating timer
     Timer.set(CONFIG.TEST_INTERVAL_MINUTES * 60 * 1000, true, getWeatherAndCalculateDuration);
   } else {
-    console.log("INFO: Script starting in PRODUCTION MODE. Running data fetch and scheduling once.");
-    getWeatherAndCalculateDuration();
+    // PRODUCTION MODE:
+    console.log("INFO: Script starting in PRODUCTION MODE. Will check time every minute to trigger at " + CONFIG.DATA_FETCH_TIME);
+    sendTelegramNotification("Heizungs-Skript gestartet. Tägliche Prüfung um " + CONFIG.DATA_FETCH_TIME + " ist aktiv.");
+   
+    // Start a repeating timer that checks the time every minute.
+    Timer.set(60000, true, dailyCheck);
+    
+    // We also run the check once on startup. This is useful if you restart the script
+    // after the trigger time has already passed for the day, ensuring a schedule
+    // for the upcoming night is still created.
+    dailyCheck();
   }
 }
 
 // --- Script Entry Point ---
 initializeTimers();
+}
 
-
+// --- Script Entry Point ---
 initializeTimers();
